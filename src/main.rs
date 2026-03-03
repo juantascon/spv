@@ -42,8 +42,7 @@ fn main() -> Result<()> {
             let rt = Runtime::new()?;
             rt.block_on(async move {
                 pid.write()?;
-                let mut child = supervisor::exec(cmd, args)?;
-                supervisor::supervise(id.clone(), &mut child).await?;
+                supervisor::supervise(id.clone(), cmd, args).await?;
                 pid.delete()?;
                 Ok::<(), anyhow::Error>(())
             })?;
@@ -146,44 +145,72 @@ mod supervisor {
     use nix::unistd::Pid;
     use std::process::Stdio;
     use tokio::io::Result;
-    use tokio::process::{Child, Command};
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
     use tokio::signal::unix::{SignalKind, signal as tokio_signal};
+    use tokio::time::{Duration, sleep};
 
-    pub fn exec(cmd: String, args: Vec<String>) -> Result<Child> {
-        Command::new(cmd.clone())
-            .args(args.clone())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-    }
+    pub async fn supervise(id: String, cmd: String, args: Vec<String>) -> Result<()> {
+        let mut first_iteration = true;
+        const SLEEP_TIME: Duration = Duration::from_millis(500);
+        'outer: loop {
+            if !first_iteration {
+                sleep(SLEEP_TIME).await;
+            }
+            first_iteration = true;
 
-    pub async fn supervise(id: String, child: &mut Child) -> Result<()> {
-        let mut sigusr1 = tokio_signal(SignalKind::user_defined1())?;
-        let mut sigterm = tokio_signal(SignalKind::terminate())?;
+            let Ok(mut child) = Command::new(cmd.clone())
+                .args(args.clone())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+            else {
+                println!("[spv:{}]: spawn() error, restarting ...", id);
+                continue;
+            };
 
-        loop {
-            println!("[spv]: supervising {}", id);
+            let Some(pid) = child.id() else {
+                println!("[spv:{}]: pawn() didn't return pid, restarting ...", id);
+                continue;
+            };
 
-            tokio::select! {
-                _ = child.wait() => {
-                    println!("\n[spv] {} exited, restarting ...", id);
-                    continue;
-                }
-                _ = sigusr1.recv() => {
-                    if let Some(pid) = child.id() {
-                        signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).ok();
+            let stdout = child.stdout.take().expect("failed to open stdout");
+            let stderr = child.stderr.take().expect("failed to open stderr");
+            let mut stdout_lines = BufReader::new(stdout).lines();
+            let mut stderr_lines = BufReader::new(stderr).lines();
+
+            let mut sigusr1 = tokio_signal(SignalKind::user_defined1())?;
+            let mut sigterm = tokio_signal(SignalKind::terminate())?;
+
+            println!("[spv:{}]: supervisor start, child pid: {:?}", id, pid);
+
+            loop {
+                tokio::select! {
+                    Ok(Some(line)) = stdout_lines.next_line() => {
+                        println!("[{}]: {}", id, line);
                     }
-                    continue;
-                }
-                _ = sigterm.recv() => {
-                    if let Some(pid) = child.id() {
-                        signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).ok();
+                    Ok(Some(line)) = stderr_lines.next_line() => {
+                        println!("[{}]: {}", id, line);
                     }
-                    break;
+                    _ = child.wait() => {
+                        println!("[spv:{}] child exited, restarting ...", id);
+                        break;
+                    }
+                    _ = sigusr1.recv() => {
+                        println!("[spv:{}] received SIGUSR1, restarting ...", id);
+                        signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).ok();
+                        break;
+                    }
+                    _ = sigterm.recv() => {
+                        println!("[spv:{}] received SIGTERM, terminating child ...", id);
+                        signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).ok();
+                        break 'outer;
+                    }
                 }
             }
         }
+        println!("[spv:{}]: supervisor end", id);
         Ok(())
     }
 }

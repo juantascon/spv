@@ -13,5 +13,5 @@ categories = ["development-tools"]
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["signal", "process", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["signal", "process", "macros", "rt-multi-thread", "io-util", "time"] }
 nix = { version = "0", features = ["signal"] }
