@@ -5,8 +5,7 @@ use nix::unistd::Pid;
 use std::fs::{self, File};
 use std::io;
 use std::path::PathBuf;
-use std::process::Stdio;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::signal::unix::{SignalKind, signal as tokio_signal};
 
 #[derive(Parser)]
@@ -35,12 +34,6 @@ enum Commands {
         id: String,
     },
     Ls,
-    #[command(hide = true)]
-    Supervise {
-        id: String,
-        cmd: String,
-        args: Vec<String>,
-    },
 }
 
 #[tokio::main]
@@ -49,19 +42,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Start { id, cmd, args } => {
-            Command::new(std::env::current_exe()?)
-                .arg("supervise")
-                .arg("--id")
-                .arg(id.unwrap_or_else(|| cmd.clone()))
-                .arg(&cmd)
-                .args(&args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
-        }
-
-        Commands::Supervise { id, cmd, args } => {
+            let id = id.unwrap_or_else(|| cmd.clone());
             let spv = SPV::from_id(id);
             spv.prepare()?;
             spv.pid_write()?;
@@ -155,7 +136,7 @@ impl SPV {
             .context(format!("process not found: {:?}", self.id))?
             .trim()
             .parse()
-            .context("invalid pid")?;
+            .context("invalid pid read from file")?;
         Ok(Pid::from_raw(pid))
     }
 
