@@ -2,9 +2,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
-use std::fs::{self, File};
+use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::process::Stdio;
 use tokio::process::{Child, Command};
 use tokio::signal::unix::{SignalKind, signal as tokio_signal};
 
@@ -30,9 +31,6 @@ enum Commands {
     Restart {
         id: String,
     },
-    Logs {
-        id: String,
-    },
     Ls,
 }
 
@@ -46,7 +44,7 @@ async fn main() -> Result<()> {
             let spv = SPV::from_id(id);
             spv.prepare()?;
             spv.pid_write()?;
-            let mut child = spv.spawn(cmd, args)?;
+            let mut child = spv.exec(cmd, args)?;
             spv.supervise(&mut child).await?
         }
 
@@ -58,11 +56,6 @@ async fn main() -> Result<()> {
         Commands::Restart { id } => {
             let spv = SPV::from_id(id);
             signal::kill(spv.pid_read()?, Signal::SIGUSR1)?;
-        }
-
-        Commands::Logs { id } => {
-            let spv = SPV::from_id(id);
-            println!("{}", spv.log_read()?);
         }
 
         Commands::Ls => {
@@ -81,7 +74,6 @@ struct SPV {
     id: String,
     dir: PathBuf,
     pid_path: PathBuf,
-    log_path: PathBuf,
 }
 
 impl SPV {
@@ -110,12 +102,10 @@ impl SPV {
     pub fn from_id(id: String) -> Self {
         let dir = SPV::run_dir().join(&id);
         let pid_path = dir.join("pid");
-        let log_path = dir.join("log");
         Self {
             id: id,
             dir: dir,
             pid_path: pid_path,
-            log_path: log_path,
         }
     }
 
@@ -140,18 +130,6 @@ impl SPV {
         Ok(Pid::from_raw(pid))
     }
 
-    pub fn log_file(&self) -> Result<File> {
-        File::options()
-            .create(true)
-            .append(true)
-            .open(&self.log_path)
-            .context(format!("failed to open log file: {:?}", self.log_path))
-    }
-
-    pub fn log_read(&self) -> Result<String> {
-        fs::read_to_string(&self.log_path).context(format!("process not found: {:?}", self.id))
-    }
-
     pub fn is_alive(&self) -> bool {
         let Ok(pid) = self.pid_read() else {
             return false;
@@ -159,13 +137,13 @@ impl SPV {
         signal::kill(pid, None).is_ok()
     }
 
-    pub fn spawn(&self, cmd: String, args: Vec<String>) -> Result<Child> {
-        Ok(Command::new(cmd.clone())
+    pub fn exec(&self, cmd: String, args: Vec<String>) -> tokio::io::Result<Child> {
+        Command::new(cmd.clone())
             .args(args.clone())
-            .stdout(self.log_file()?)
-            .stderr(self.log_file()?)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .kill_on_drop(true)
-            .spawn()?)
+            .spawn()
     }
 
     pub async fn supervise(&self, child: &mut Child) -> Result<()> {
