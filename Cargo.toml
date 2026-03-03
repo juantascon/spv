@@ -2,6 +2,13 @@
 name = "spv"
 version = "0.1.0"
 edition = "2024"
+authors = ["juantascon <juan@tascon.dev>"]
+description = "A minimalist, unix-inspired process supervisor for linux"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/juantascon/spv"
+readme = "README.md"
+keywords = ["cli", "utility", "supervisor"]
+categories = ["development-tools"]
 
 [dependencies]
 anyhow = "1"
