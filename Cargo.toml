@@ -1,6 +1,6 @@
 [package]
 name = "spv"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["juantascon <juan@tascon.dev>"]
 description = "A minimalist, unix-inspired process supervisor for linux"
