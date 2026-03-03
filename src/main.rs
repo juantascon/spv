@@ -5,9 +5,6 @@ use nix::unistd::Pid;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::process::Stdio;
-use tokio::process::{Child, Command};
-use tokio::signal::unix::{SignalKind, signal as tokio_signal};
 
 #[derive(Parser)]
 #[command(name = "spv", version = "1.0", about = "Simple Process Supervisor")]
@@ -41,27 +38,27 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Start { id, cmd, args } => {
             let id = id.unwrap_or_else(|| cmd.clone());
-            let spv = SPV::from_id(id);
-            spv.prepare()?;
-            spv.pid_write()?;
-            let mut child = spv.exec(cmd, args)?;
-            spv.supervise(&mut child).await?
+            let pid = PID::from_id(id.clone());
+            pid.write()?;
+            let mut child = supervisor::exec(cmd, args)?;
+            supervisor::supervise(id.clone(), &mut child).await?;
+            pid.delete()?
         }
 
         Commands::Stop { id } => {
-            let spv = SPV::from_id(id);
-            signal::kill(spv.pid_read()?, Signal::SIGTERM)?;
+            let pid = PID::from_id(id);
+            pid.signal(Some(Signal::SIGTERM))?
         }
 
         Commands::Restart { id } => {
-            let spv = SPV::from_id(id);
-            signal::kill(spv.pid_read()?, Signal::SIGUSR1)?;
+            let pid = PID::from_id(id);
+            pid.signal(Some(Signal::SIGUSR1))?
         }
 
         Commands::Ls => {
-            for spv in SPV::ls() {
-                if spv.is_alive() {
-                    println!("{}", spv.id);
+            for pid in PID::ls() {
+                if pid.is_alive() {
+                    println!("{}", pid.id);
                 }
             }
         }
@@ -70,26 +67,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-struct SPV {
-    id: String,
-    dir: PathBuf,
-    pid_path: PathBuf,
-}
+mod cfg {
+    use std::path::PathBuf;
 
-impl SPV {
-    pub fn ls() -> Vec<SPV> {
-        let Ok(entries) = fs::read_dir(SPV::run_dir()) else {
-            return Vec::new();
-        };
-        entries
-            .filter_map(|entry| {
-                let id = entry.ok()?.file_name().into_string().ok()?;
-                Some(SPV::from_id(id))
-            })
-            .collect()
-    }
-
-    fn run_dir() -> PathBuf {
+    pub fn run_dir() -> PathBuf {
         match std::env::var("SPV_RUNTIME_DIR") {
             Ok(dir) => PathBuf::from(dir),
             Err(_) => {
@@ -98,9 +79,29 @@ impl SPV {
             }
         }
     }
+}
+
+struct PID {
+    id: String,
+    dir: PathBuf,
+    pid_path: PathBuf,
+}
+
+impl PID {
+    pub fn ls() -> Vec<PID> {
+        let Ok(entries) = fs::read_dir(cfg::run_dir()) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| {
+                let id = entry.ok()?.file_name().into_string().ok()?;
+                Some(PID::from_id(id))
+            })
+            .collect()
+    }
 
     pub fn from_id(id: String) -> Self {
-        let dir = SPV::run_dir().join(&id);
+        let dir = cfg::run_dir().join(&id);
         let pid_path = dir.join("pid");
         Self {
             id: id,
@@ -109,19 +110,16 @@ impl SPV {
         }
     }
 
-    pub fn prepare(&self) -> io::Result<()> {
-        fs::create_dir_all(&self.dir)
-    }
-
-    pub fn pid_write(&self) -> io::Result<()> {
+    pub fn write(&self) -> io::Result<()> {
+        fs::create_dir_all(&self.dir)?;
         fs::write(&self.pid_path, std::process::id().to_string())
     }
 
-    pub fn pid_delete(&self) -> io::Result<()> {
-        fs::remove_file(&self.pid_path)
+    pub fn delete(&self) -> io::Result<()> {
+        fs::remove_dir_all(&self.dir)
     }
 
-    pub fn pid_read(&self) -> Result<Pid> {
+    pub fn read(&self) -> Result<Pid> {
         let pid: i32 = fs::read_to_string(&self.pid_path)
             .context(format!("process not found: {:?}", self.id))?
             .trim()
@@ -131,13 +129,24 @@ impl SPV {
     }
 
     pub fn is_alive(&self) -> bool {
-        let Ok(pid) = self.pid_read() else {
-            return false;
-        };
-        signal::kill(pid, None).is_ok()
+        self.signal(None).is_ok()
     }
 
-    pub fn exec(&self, cmd: String, args: Vec<String>) -> tokio::io::Result<Child> {
+    pub fn signal(&self, sig: Option<Signal>) -> Result<()> {
+        let pid = self.read()?;
+        signal::kill(pid, sig).context("unable to send signal")
+    }
+}
+
+mod supervisor {
+    use nix::sys::signal::{self, Signal};
+    use nix::unistd::Pid;
+    use std::process::Stdio;
+    use tokio::io::Result;
+    use tokio::process::{Child, Command};
+    use tokio::signal::unix::{SignalKind, signal as tokio_signal};
+
+    pub fn exec(cmd: String, args: Vec<String>) -> Result<Child> {
         Command::new(cmd.clone())
             .args(args.clone())
             .stdout(Stdio::null())
@@ -146,16 +155,16 @@ impl SPV {
             .spawn()
     }
 
-    pub async fn supervise(&self, child: &mut Child) -> Result<()> {
+    pub async fn supervise(id: String, child: &mut Child) -> Result<()> {
         let mut sigusr1 = tokio_signal(SignalKind::user_defined1())?;
         let mut sigterm = tokio_signal(SignalKind::terminate())?;
 
         loop {
-            println!("[spv]: supervising {}", self.id);
+            println!("[spv]: supervising {}", id);
 
             tokio::select! {
                 _ = child.wait() => {
-                    println!("\n[spv] {} exited, restarting ...", self.id);
+                    println!("\n[spv] {} exited, restarting ...", id);
                     continue;
                 }
                 _ = sigusr1.recv() => {
@@ -168,7 +177,6 @@ impl SPV {
                     if let Some(pid) = child.id() {
                         signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).ok();
                     }
-                    self.pid_delete().ok();
                     break;
                 }
             }
