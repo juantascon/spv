@@ -117,8 +117,13 @@ impl SPV {
     }
 
     fn run_dir() -> PathBuf {
-        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(base).join("spv")
+        match std::env::var("SPV_RUNTIME_DIR") {
+            Ok(dir) => PathBuf::from(dir),
+            Err(_) => {
+                let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+                PathBuf::from(base).join("spv")
+            }
+        }
     }
 
     pub fn from_id(id: String) -> Self {
