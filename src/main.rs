@@ -65,38 +65,8 @@ async fn main() -> Result<()> {
             let spv = SPV::from_id(id);
             spv.prepare()?;
             spv.pid_write()?;
-            let mut sigusr1 = tokio_signal(SignalKind::user_defined1())?;
-            let mut sigterm = tokio_signal(SignalKind::terminate())?;
-
-            loop {
-                let mut child = Command::new(&cmd)
-                    .args(args.clone())
-                    .stdout(spv.log_file()?)
-                    .stderr(spv.log_file()?)
-                    .kill_on_drop(true)
-                    .spawn()?;
-                println!("[spv]: supervising {}", spv.id);
-
-                tokio::select! {
-                    _ = child.wait() => {
-                        println!("\n[spv] {} exited, restarting ...", spv.id);
-                        continue;
-                    }
-                    _ = sigusr1.recv() => {
-                        if let Some(pid) = child.id() {
-                            signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).ok();
-                        }
-                        continue;
-                    }
-                    _ = sigterm.recv() => {
-                        if let Some(pid) = child.id() {
-                            signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).ok();
-                        }
-                        spv.pid_delete().ok();
-                        break;
-                    }
-                }
-            }
+            let mut child = spv.spawn(cmd, args)?;
+            spv.supervise(&mut child).await?
         }
 
         Commands::Stop { id } => {
@@ -201,5 +171,44 @@ impl SPV {
             return false;
         };
         signal::kill(pid, None).is_ok()
+    }
+
+    pub fn spawn(&self, cmd: String, args: Vec<String>) -> Result<Child> {
+        Ok(Command::new(cmd.clone())
+            .args(args.clone())
+            .stdout(self.log_file()?)
+            .stderr(self.log_file()?)
+            .kill_on_drop(true)
+            .spawn()?)
+    }
+
+    pub async fn supervise(&self, child: &mut Child) -> Result<()> {
+        let mut sigusr1 = tokio_signal(SignalKind::user_defined1())?;
+        let mut sigterm = tokio_signal(SignalKind::terminate())?;
+
+        loop {
+            println!("[spv]: supervising {}", self.id);
+
+            tokio::select! {
+                _ = child.wait() => {
+                    println!("\n[spv] {} exited, restarting ...", self.id);
+                    continue;
+                }
+                _ = sigusr1.recv() => {
+                    if let Some(pid) = child.id() {
+                        signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).ok();
+                    }
+                    continue;
+                }
+                _ = sigterm.recv() => {
+                    if let Some(pid) = child.id() {
+                        signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM).ok();
+                    }
+                    self.pid_delete().ok();
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 }
