@@ -5,6 +5,7 @@ use nix::unistd::Pid;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use tokio::runtime::Runtime;
 
 #[derive(Parser)]
 #[command(name = "spv", version = "1.0", about = "Simple Process Supervisor")]
@@ -31,20 +32,22 @@ enum Commands {
     Ls,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Start { id, cmd, args } => {
             let id = id.unwrap_or_else(|| cmd.clone());
             let pid = PID::from_id(id.clone());
-            pid.write()?;
-            let mut child = supervisor::exec(cmd, args)?;
-            supervisor::supervise(id.clone(), &mut child).await?;
-            pid.delete()?
+            let rt = Runtime::new()?;
+            rt.block_on(async move {
+                pid.write()?;
+                let mut child = supervisor::exec(cmd, args)?;
+                supervisor::supervise(id.clone(), &mut child).await?;
+                pid.delete()?;
+                Ok::<(), anyhow::Error>(())
+            })?;
         }
-
         Commands::Stop { id } => {
             let pid = PID::from_id(id);
             pid.signal(Some(Signal::SIGTERM))?
